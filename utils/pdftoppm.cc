@@ -82,6 +82,7 @@ static int w = 0;
 static int h = 0;
 static int sz = 0;
 static GBool useCropBox = gFalse;
+static GBool processAnnotations = gFalse;
 static GBool mono = gFalse;
 static GBool gray = gFalse;
 static GBool png = gFalse;
@@ -149,6 +150,9 @@ static const ArgDesc argDesc[] = {
   {"-cropbox",argFlag,     &useCropBox,    0,
    "use the crop box rather than media box"},
 
+   {"-processannotations",argFlag, &processAnnotations,    0,
+    "generate image with annotations"},
+
   {"-mono",   argFlag,     &mono,          0,
    "generate a monochrome PBM file"},
   {"-gray",   argFlag,     &gray,          0,
@@ -181,17 +185,17 @@ static const ArgDesc argDesc[] = {
    "enable FreeType font rasterizer: yes, no"},
   {"-thinlinemode", argString, thinLineModeStr, sizeof(thinLineModeStr),
    "set thin line mode: none, solid, shape. Default: none"},
-  
+
   {"-aa",         argString,      antialiasStr,   sizeof(antialiasStr),
    "enable font anti-aliasing: yes, no"},
   {"-aaVector",   argString,      vectorAntialiasStr, sizeof(vectorAntialiasStr),
    "enable vector anti-aliasing: yes, no"},
-  
+
   {"-opw",    argString,   ownerPassword,  sizeof(ownerPassword),
    "owner password (for encrypted files)"},
   {"-upw",    argString,   userPassword,   sizeof(userPassword),
    "user password (for encrypted files)"},
-  
+
 #ifdef UTILS_USE_PTHREADS
   {"-j",      argInt,      &numberOfJobs,  0,
    "number of jobs to run concurrently"},
@@ -264,20 +268,25 @@ static GBool parseJpegOptions()
   return gTrue;
 }
 
+static GBool shouldProcessAnnotation(Annot *, void * pflag) {
+  return (*((bool*)pflag)) ? gTrue : gFalse;
+};
+
 static void savePageSlice(PDFDoc *doc,
-                   SplashOutputDev *splashOut, 
-                   int pg, int x, int y, int w, int h, 
-                   double pg_w, double pg_h, 
+                   SplashOutputDev *splashOut,
+                   int pg, int x, int y, int w, int h,
+                   double pg_w, double pg_h,
                    char *ppmFile) {
   if (w == 0) w = (int)ceil(pg_w);
   if (h == 0) h = (int)ceil(pg_h);
   w = (x+w > pg_w ? (int)ceil(pg_w-x) : w);
   h = (y+h > pg_h ? (int)ceil(pg_h-y) : h);
-  doc->displayPageSlice(splashOut, 
-    pg, x_resolution, y_resolution, 
+  doc->displayPageSlice(splashOut,
+    pg, x_resolution, y_resolution,
     0,
     !useCropBox, gFalse, gFalse,
-    x, y, w, h
+    x, y, w, h,
+    NULL, NULL, &shouldProcessAnnotation, &processAnnotations
   );
 
   SplashBitmap *bitmap = splashOut->getBitmap();
@@ -321,10 +330,10 @@ static void savePageSlice(PDFDoc *doc,
 struct PageJob {
   PDFDoc *doc;
   int pg;
-  
+
   double pg_w, pg_h;
   SplashColor* paperColor;
-  
+
   char *ppmFile;
 };
 
@@ -335,18 +344,18 @@ static void processPageJobs() {
   while(true) {
     // pop the next job or exit if queue is empty
     pthread_mutex_lock(&pageJobMutex);
-    
+
     if(pageJobQueue.empty()) {
       pthread_mutex_unlock(&pageJobMutex);
       return;
     }
-    
+
     PageJob pageJob = pageJobQueue.front();
     pageJobQueue.pop_front();
-    
+
     pthread_mutex_unlock(&pageJobMutex);
-    
-    // process the job    
+
+    // process the job
     SplashOutputDev *splashOut = new SplashOutputDev(mono ? splashModeMono1 :
                   gray ? splashModeMono8 :
 #ifdef SPLASH_CMYK
@@ -356,9 +365,9 @@ static void processPageJobs() {
     splashOut->setFontAntialias(fontAntialias);
     splashOut->setVectorAntialias(vectorAntialias);
     splashOut->startDoc(pageJob.doc);
-    
+
     savePageSlice(pageJob.doc, splashOut, pageJob.pg, x, y, w, h, pageJob.pg_w, pageJob.pg_h, pageJob.ppmFile);
-    
+
     delete splashOut;
     delete[] pageJob.ppmFile;
   }
@@ -522,14 +531,14 @@ int main(int argc, char *argv[]) {
     globalParams->setOverprintPreview(gTrue);
     for (int cp = 0; cp < SPOT_NCOMPS+4; cp++)
       paperColor[cp] = 0;
-  } else 
+  } else
 #endif
   {
     paperColor[0] = 255;
     paperColor[1] = 255;
     paperColor[2] = 255;
   }
-  
+
 #ifndef UTILS_USE_PTHREADS
 
   splashOut = new SplashOutputDev(mono ? splashModeMono1 :
@@ -545,9 +554,9 @@ int main(int argc, char *argv[]) {
   splashOut->setFontAntialias(fontAntialias);
   splashOut->setVectorAntialias(vectorAntialias);
   splashOut->startDoc(doc);
-  
+
 #endif // UTILS_USE_PTHREADS
-  
+
   if (sz != 0) w = h = sz;
   pg_num_len = numberOfCharacters(doc->getNumPages());
   for (pg = firstPage; pg <= lastPage; ++pg) {
@@ -598,30 +607,30 @@ int main(int argc, char *argv[]) {
 #ifndef UTILS_USE_PTHREADS
     // process job in main thread
     savePageSlice(doc, splashOut, pg, x, y, w, h, pg_w, pg_h, ppmFile);
-    
+
     delete[] ppmFile;
 #else
-    
+
     // queue job for worker threads
     PageJob pageJob = {
       .doc = doc,
       .pg = pg,
-      
+
       .pg_w = pg_w, .pg_h = pg_h,
-      
+
       .paperColor = &paperColor,
-      
+
       .ppmFile = ppmFile
     };
-    
+
     pageJobQueue.push_back(pageJob);
-    
+
 #endif // UTILS_USE_PTHREADS
   }
 #ifndef UTILS_USE_PTHREADS
   delete splashOut;
 #else
-  
+
   // spawn worker threads and wait on them
   jobs = (pthread_t*)malloc(numberOfJobs * sizeof(pthread_t));
 
@@ -631,7 +640,7 @@ int main(int argc, char *argv[]) {
 	    exit(EXIT_FAILURE);
     }
   }
-  
+
   for(int i=0; i < numberOfJobs; ++i) {
     if(pthread_join(jobs[i], NULL) != 0) {
       fprintf(stderr, "pthread_join() failed with errno: %d\n", errno);
@@ -640,7 +649,7 @@ int main(int argc, char *argv[]) {
   }
 
   free(jobs);
-  
+
 #endif // UTILS_USE_PTHREADS
 
   exitCode = 0;
